@@ -389,13 +389,38 @@ test('Esri fallbacks report and attribute the imagery source actually rendered',
 
 test('repeated active Esri tile failures fall back to OSM and one transient does not', () => {
   const controller = readFileSync(new URL('./mapStackController.js', import.meta.url), 'utf8');
-  assert.match(controller, /let failures = 0/);
-  assert.match(controller, /if \(failures < 2 \|\| this\._esriFallbackPending\) return/);
+  // The counting and threshold rules moved into the pure policy module (behaviour
+  // covered by mapTileFailurePolicy.test.mjs); the controller still owns the
+  // wiring, so each half is pinned where it now lives.
+  const policy = readFileSync(new URL('./mapTileFailurePolicy.js', import.meta.url), 'utf8');
+  assert.match(policy, /export const ESRI_TILE_FAILURE_THRESHOLD = 2/, 'one transient Esri error stays with Cesium retry');
+  assert.match(controller, /const policy = createTileFailurePolicy\(resolution\.effectiveStackId\)/);
+  assert.match(controller, /if \(decision\.action === 'none' \|\| this\._esriFallbackPending\) return/);
   assert.match(controller, /this\.setStack\('osm', \{ silent: true \}\)/);
   assert.match(controller, /state\?\.activeId === 'osm'[\s\S]*?this\._emitChange\('error'\)/);
   assert.match(
     controller,
     /gen !== this\._switchGen \|\| this\._activeImageryProvider !== resolution\.provider/,
     'a stale provider error must not replace a newer user selection',
+  );
+});
+
+test('the last keyless provider reports unreachable tiles instead of a silent blank globe', () => {
+  const controller = readFileSync(new URL('./mapStackController.js', import.meta.url), 'utf8');
+  const ui = readFileSync(new URL('./ui.js', import.meta.url), 'utf8');
+  assert.match(
+    controller,
+    /decision\.action === 'report'[\s\S]*?this\._lastError = decision\.message[\s\S]*?this\._emitChange\('error'\)/,
+    'a terminal provider failure must surface as controller state, not just a console warning',
+  );
+  assert.match(
+    ui,
+    /if \(event\.detail\?\.status === 'error'\) this\._reportMapStackError\(event\.detail\.lastError\)/,
+    'a provider-driven failure must reach the operator in words',
+  );
+  assert.match(
+    ui,
+    /if \(!message \|\| message === this\._lastReportedMapStackError\) return/,
+    'the same failure must not retoast on every retried tile',
   );
 });

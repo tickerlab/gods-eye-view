@@ -3496,6 +3496,10 @@ export class StyleManager {
       this._mapStackChangeHandler = (event) => {
         this._renderMapStackState(event.detail);
         this._syncShareState();
+        // The status chip only tints on error. A provider-driven failure has no
+        // click to explain it, so say what happened in words too — otherwise an
+        // unreachable tile host reads as a blank globe with a healthy HUD.
+        if (event.detail?.status === 'error') this._reportMapStackError(event.detail.lastError);
       };
       window.addEventListener('gev:map-stack-changed', this._mapStackChangeHandler);
     }
@@ -3505,7 +3509,25 @@ export class StyleManager {
       onSelect: (stackId) => { this._setMapStack(stackId); },
     });
 
-    this._renderMapStackState(this.mapStackController.getState());
+    const state = this.mapStackController.getState();
+    this._renderMapStackState(state);
+    // Boot resolves the map stack silently, so a first-run fallback (Esri
+    // unreachable -> OSM) is already recorded before this panel exists.
+    this._reportMapStackError(state?.lastError);
+  }
+
+  /**
+   * Shows a map-source failure once, whoever noticed it first.
+   *
+   * The click path and the provider-driven change event can both carry the same
+   * failure; repeating it would retrigger the toast on every retried tile.
+   * @param {string|null|undefined} message - Controller `lastError`, if any.
+   * @returns {void}
+   */
+  _reportMapStackError(message) {
+    if (!message || message === this._lastReportedMapStackError) return;
+    this._lastReportedMapStackError = message;
+    this._showToast(message);
   }
 
   /**
@@ -3524,7 +3546,7 @@ export class StyleManager {
     this._renderMapStackState(state);
 
     if (state?.activeId === before && stackId !== before && state?.lastError) {
-      this._showToast(state.lastError);
+      this._reportMapStackError(state.lastError);
     }
     if (syncShare) this._syncShareState();
   }
