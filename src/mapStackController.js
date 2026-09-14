@@ -1,4 +1,5 @@
 import * as Cesium from 'cesium';
+import { createTileFailurePolicy } from './mapTileFailurePolicy.js';
 import { governorRequestRender } from './renderGovernor.js';
 
 export const MAP_STACKS = [
@@ -275,7 +276,7 @@ export class MapStackController {
     this._activeImageryProvider = resolution.provider;
     this.viewer.imageryLayers.add(this._imageryLayer, 0);
     this._syncEsriAttribution(resolution.effectiveStackId);
-    this._watchEsriProvider(resolution, gen);
+    this._watchImageryProvider(resolution, gen);
 
     if (this.googleTileset) this.googleTileset.show = false;
     this.viewer.scene.globe.show = true;
@@ -359,28 +360,34 @@ export class MapStackController {
   }
 
   /**
-   * Esri provider construction can succeed while its first tile requests fail.
-   * Two failures for the active provider trigger the same truthful OSM fallback
-   * as a construction failure; one transient error is left to Cesium's retry.
+   * A provider can construct successfully and still fail every tile request.
+   * Two failures on Esri trigger the same truthful OSM fallback as a
+   * construction failure; one transient error is left to Cesium's retry. OSM is
+   * the last keyless provider, so a run of failures there has nothing left to
+   * fall back to — it is reported once instead of leaving a blank globe with no
+   * explanation. Escalation rules live in `mapTileFailurePolicy.js`.
    */
-  _watchEsriProvider(resolution, gen) {
-    if (resolution.effectiveStackId !== 'esri-imagery') return;
+  _watchImageryProvider(resolution, gen) {
     const errorEvent = resolution.provider?.errorEvent;
     if (!errorEvent?.addEventListener) return;
-    let failures = 0;
+    const policy = createTileFailurePolicy(resolution.effectiveStackId);
     this._removeImageryErrorListener = errorEvent.addEventListener((error) => {
       if (gen !== this._switchGen || this._activeImageryProvider !== resolution.provider) return;
-      const retryCount = Number(error?.timesRetried);
-      failures = Number.isInteger(retryCount) && retryCount >= 0
-        ? Math.max(failures + 1, retryCount + 1)
-        : failures + 1;
-      if (failures < 2 || this._esriFallbackPending) return;
+      const decision = policy.record(error);
+      if (decision.action === 'none' || this._esriFallbackPending) return;
+
+      if (decision.action === 'report') {
+        this._lastError = decision.message;
+        this._onError?.(decision.message, this.getStack(resolution.effectiveStackId));
+        this._emitChange('error');
+        return;
+      }
+
       this._esriFallbackPending = true;
-      const message = 'Esri Satellite tile requests failed; using OSM';
-      this._onError?.(message, this.getStack('esri-imagery'));
+      this._onError?.(decision.message, this.getStack('esri-imagery'));
       void this.setStack('osm', { silent: true }).then((state) => {
         if (state?.activeId === 'osm') {
-          this._lastError = message;
+          this._lastError = decision.message;
           this._emitChange('error');
         }
       }).finally(() => {
